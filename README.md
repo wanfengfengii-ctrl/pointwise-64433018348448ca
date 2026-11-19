@@ -62,6 +62,31 @@ payload = export_report(reports, result.report_id)
 
 `forecast` 接收非空的一组不同件号，按各件所载的修订引用计数，最多六条。`PublishedReport` 包含报告号、试验号、预测时刻、相位集合、按件号排序的出处和回执。`read` 返回固定报告，`export_report` 返回其规范 JSON 文本，有效但未知的报告号得到 `None`。错误参数和业务拒绝抛出 `ValueError`，SQLite 提交错误向调用者传递。成功报告和回执在一次提交后才返回。
 
+## V2 站钟件
+
+V2 站钟件处理同一试验内站点具有固定但未知钟差的情形。钟差以秒计，跨同站各条读数保持不变；实际观测时刻为名义时刻加本站钟差，并须落在登记时域内。V1 入口、编码、历史报告与回归保持不变，V2 使用独立的 `CK-` 件号和 `version: 2` JSON 对象。
+
+```python
+from phase.station.clock_issue import ClockIssueLedger, issue_clock
+from phase.station.clock_artifact import encode_clock_artifact
+from phase.analysis.clock_catalog import ClockCatalog
+from phase.analysis.clock_intake import accept_clock
+from phase.analysis.clock_forecast import forecast_clock
+from phase.trials.stations import StationSource
+
+clock_issues = ClockIssueLedger(east_db)
+clock_piece = issue_clock(registry, observations, clock_issues, trial, 'east',
+                          [revision.ref], ('-1/2', '1/2'))
+clock_catalog = ClockCatalog(center_db)
+clock_id = accept_clock(registry, clock_catalog, encode_clock_artifact(clock_piece),
+                        StationSource('east', 'east-desk'))
+clock_report = forecast_clock(registry, clock_catalog, reports, [clock_id], '2')
+```
+
+`clock_bounds` 是按下界、上界排列的两个有理端点，允许相等端点。`issue_clock` 绑定固定试验、登记来源、明确修订、有理闭区间钟差预算和证据；同一固定内容重复签发沿用原 `CK-` 件号。`accept_clock` 同号同内容可重投并返回原号，同号异内容、来源不符、坏件或非 V2 载荷抛出 `ValueError`，且保留已有接纳结果。
+
+中心只选同试验的非空互异 V2 站钟件，各件修订引用合计至多六条。同一站点跨多件的预算以有理值比较必须一致，异站各取一个钟差，所有选中修订共享同一初相和频偏。`forecast_clock` 用共同试验时刻，按 V1 的 `PhaseInterval` 顺序与开闭规则精确签出模一相位集合，保留开端点、孤点和带出处的空集；预算内无合法实际时刻时同样签空集。非法输入、坏件、未知件或混版选件抛出 `ValueError`，非法请求不产生新成果。报告、出处和回执同一次提交，提交失败可重试；更正读数、重开中心库后仍用原报告号经 `phase.reports.export.read` 领取固定成果。`clock_examples.py` 的 `CASES` 给出七个 V2 对照样例及其精确预期。
+
 ## 数值约定
 
 时刻以秒计，登记时域在 `[0,4]` 内。频偏以圈每秒计，登记闭区间在 `[−1/4,1/4]` 内。数值输入接受 `Fraction`、整数和有理数字符串，存档使用约分后的规范字符串。观测端点均在 `[0,1)`，起点大于终点表示过零，起终点相等表示刻线。缺项与越界数值均为输入错误。

@@ -1,6 +1,9 @@
 from contextlib import closing
 import json
 
+from phase.analysis.clock_catalog import ClockCatalog
+from phase.analysis.clock_forecast import forecast_clock
+from phase.analysis.clock_intake import accept_clock
 from phase.analysis.catalog import AcceptedCatalog
 from phase.analysis.forecast import forecast
 from phase.analysis.intake import accept
@@ -10,10 +13,13 @@ from phase.observations.ledger import ObservationLedger
 from phase.reports.export import read
 from phase.reports.ledger import ReportLedger
 from phase.station.artifact import encode_artifact
+from phase.station.clock_artifact import encode_clock_artifact
+from phase.station.clock_issue import ClockIssueLedger, issue_clock
 from phase.station.issue import issue
 from phase.station.ledger import StationLedger
 from phase.storage import connect
 from phase.trials.registry import TrialRegistry, register
+from phase.trials.stations import StationSource
 
 SOURCES = {"A": "east-desk", "B": "west-desk"}
 # packages 中每项为 (站点, 钟差预算, 本件读数)。每条读数为 (观测号, 名义秒, 弧始, 弧末)。
@@ -96,5 +102,45 @@ def show_v1_boundary():
                           "v1_nominal_phases": phases}, sort_keys=True))
 
 
+def run_clock_case(case_id, registry, catalog, reports, station_ledgers, issue_ledgers):
+    """Issue, accept and forecast one clock case through the V2 entry points."""
+    trial, selections = record_case(case_id, registry, station_ledgers)
+    selected = []
+    for station, bounds, refs in selections:
+        piece = issue_clock(registry, station_ledgers[station], issue_ledgers[station],
+                            trial, station, refs, bounds)
+        selected.append(accept_clock(
+            registry, catalog, encode_clock_artifact(piece),
+            StationSource(station, SOURCES[station])))
+    report = forecast_clock(registry, catalog, reports, selected, CASES[case_id]["forecast_at"])
+    phases = encode_phase_set(report.phases)
+    if phases != CASES[case_id]["expected"]:
+        raise AssertionError(
+            f"CLOCK_FORECAST_MISMATCH {case_id} expected {CASES[case_id]['expected']}, got {phases}")
+    return selected, report, phases
+
+
+def show_clock_cases():
+    """Exercise every documented clock case against the exact V2 oracle."""
+    results = []
+    with closing(connect(":memory:")) as center:
+        registry = TrialRegistry(center)
+        catalog = ClockCatalog(center)
+        reports = ReportLedger(center)
+        with closing(connect(":memory:")) as station_db:
+            station_ledgers = {station: ObservationLedger(station_db) for station in SOURCES}
+            issue_ledgers = {station: ClockIssueLedger(station_db) for station in SOURCES}
+            for case_id in CASES:
+                selected, report, phases = run_clock_case(
+                    case_id, registry, catalog, reports, station_ledgers, issue_ledgers)
+                if read(reports, report.report_id) != report:
+                    raise AssertionError(f"stored clock report differs for {case_id}")
+                results.append({"case": case_id, "artifacts": sorted(selected),
+                                "clock_phases": phases})
+    for entry in results:
+        print(json.dumps(entry, sort_keys=True))
+
+
 if __name__ == "__main__":
     show_v1_boundary()
+    show_clock_cases()
